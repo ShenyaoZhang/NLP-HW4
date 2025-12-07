@@ -1,0 +1,68 @@
+{
+  "timestamp": "2025-11-11 10:50:52",
+  "best_model": "XGBoost",
+  "n_train_full": 13382,
+  "n_test": 3346,
+  "pos_train_full": 3144,
+  "pos_test": 786,
+  "pos_rate_train_full": 0.23494246002092362,
+  "pos_rate_test": 0.2349073520621638,
+  "n_features": 14,
+  "feature_cols": [
+    "patientonsetage",
+    "age_years",
+    "patientsex",
+    "patientweight",
+    "num_drugs",
+    "num_reactions",
+    "age_missing",
+    "sex_male",
+    "sex_female",
+    "sex_unknown",
+    "polypharmacy",
+    "high_polypharmacy",
+    "multiple_reactions",
+    "many_reactions"
+  ],
+  "metric_primary": "PR-AUC",
+  "threshold_source": "validation (F1-max)",
+  "scale_pos_weight": 3.2563613231552164,
+  "results": {
+    "Logistic Regression": {
+      "accuracy": 0.4739988045427376,
+      "precision": 0.2780309936189608,
+      "recall": 0.7760814249363868,
+      "f1": 0.40939597315436244,
+      "roc_auc": 0.6198190004770991,
+      "pr_auc": 0.3420598397104017,
+      "best_threshold": 0.4454442235394051
+    },
+    "Random Forest": {
+      "accuracy": 0.5696353855349672,
+      "precision": 0.2914540816326531,
+      "recall": 0.5814249363867684,
+      "f1": 0.3882752761257434,
+      "roc_auc": 0.6129341106075064,
+      "pr_auc": 0.3663717142202429,
+      "best_threshold": 0.30176708703098243
+    },
+    "Gradient Boosting": {
+      "accuracy": 0.6034070531978482,
+      "precision": 0.3183344526527871,
+      "recall": 0.6030534351145038,
+      "f1": 0.4167032967032967,
+      "roc_auc": 0.6439577369592875,
+      "pr_auc": 0.39434019580327256,
+      "best_threshold": 0.22157508187072808
+    },
+    "XGBoost": {
+      "accuracy": 0.6939629408248655,
+      "precision": 0.37259100642398285,
+      "recall": 0.44274809160305345,
+      "f1": 0.4046511627906977,
+      "roc_auc": 0.6397846095737914,
+      "pr_auc": 0.3979875303784384,
+      "best_threshold": 0.5432969927787781
+    }
+  }
+}

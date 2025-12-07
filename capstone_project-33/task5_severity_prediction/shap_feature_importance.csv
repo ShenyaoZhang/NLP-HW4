@@ -1,0 +1,15 @@
+feature,mean_abs_shap
+num_drugs,0.2576519
+age_years,0.25658628
+patientweight,0.2140308
+num_reactions,0.19333526
+patientsex,0.16575454
+patientonsetage,0.14855745
+sex_male,0.10532344
+age_missing,0.05008437
+sex_female,0.020829644
+multiple_reactions,0.02002613
+polypharmacy,0.014222897
+sex_unknown,0.010676586
+high_polypharmacy,0.007544926
+many_reactions,0.005651253

@@ -1,0 +1,803 @@
+#!/usr/bin/env python3
+"""
+Requirement 2: Focused Analysis on Epcoritamab and Cytokine Release Syndrome
+AI-Powered Pharmacovigilance System for Oncology Drug Safety Monitoring
+
+This script provides a focused survival analysis of:
+- Drug: Epcoritamab (bispecific CD3xCD20 antibody)
+- Adverse Event: Cytokine Release Syndrome (CRS)
+- Analysis: Time-to-event modeling, risk factors, and clinical recommendations
+
+Modified from general analysis to address mentor feedback.
+"""
+
+import pandas as pd
+import numpy as np
+import requests
+import json
+import time
+from datetime import datetime
+from typing import Dict, List, Tuple, Optional
+import warnings
+warnings.filterwarnings('ignore')
+
+# Survival Analysis Libraries
+from lifelines import CoxPHFitter, KaplanMeierFitter
+from lifelines.statistics import logrank_test
+from lifelines.utils import concordance_index
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Machine Learning Libraries
+from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_val_score, KFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score, classification_report
+
+# Statistical Libraries
+from scipy import stats
+from statsmodels.stats.multitest import multipletests
+
+
+class EpcoritamabCRSAnalysis:
+    """
+    Focused survival analysis for Epcoritamab and Cytokine Release Syndrome
+    """
+    
+    def __init__(self):
+        self.base_url = "https://api.fda.gov/drug/event.json"
+        self.drug_name = "Epcoritamab"
+        
+        # CRS-related search terms (comprehensive)
+        self.crs_terms = [
+            "CYTOKINE RELEASE SYNDROME",
+            "CRS",
+            "CYTOKINE STORM",
+            "IMMUNE EFFECTOR CELL-ASSOCIATED NEUROTOXICITY SYNDROME",
+            "ICANS",
+            "MACROPHAGE ACTIVATION SYNDROME",
+            "TUMOR LYSIS SYNDROME",
+            "CAPILLARY LEAK SYNDROME",
+            "SYSTEMIC INFLAMMATORY RESPONSE SYNDROME",
+            "SIRS"
+        ]
+        
+        # CRS-related symptoms for broader capture
+        self.crs_symptoms = [
+            "FEVER", "HYPOTENSION", "HYPOXIA", "TACHYCARDIA",
+            "ELEVATED FERRITIN", "ELEVATED C-REACTIVE PROTEIN",
+            "ELEVATED IL-6", "ELEVATED INTERLEUKIN"
+        ]
+        
+        self.data = []
+        self.crs_data = []
+        
+    def collect_epcoritamab_data(self, limit: int = 1000) -> pd.DataFrame:
+        """
+        Collect all adverse event data for Epcoritamab from FDA FAERS
+        """
+        print(f"=" * 80)
+        print(f"COLLECTING DATA FOR {self.drug_name}")
+        print(f"=" * 80)
+        
+        all_records = []
+        skip = 0
+        batch_size = 100
+        
+        while skip < limit:
+            try:
+                # Search for Epcoritamab in patient.drug.medicinalproduct
+                search_query = f'patient.drug.medicinalproduct:"{self.drug_name}"'
+                params = {
+                    'search': search_query,
+                    'limit': batch_size,
+                    'skip': skip
+                }
+                
+                response = requests.get(self.base_url, params=params, timeout=30)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    results = data.get('results', [])
+                    
+                    if not results:
+                        break
+                    
+                    for record in results:
+                        all_records.append(self._extract_record_data(record))
+                    
+                    print(f"✓ Collected {len(all_records)} records (batch: {skip}-{skip+batch_size})")
+                    skip += batch_size
+                    time.sleep(0.5)  # Rate limiting
+                    
+                else:
+                    print(f"✗ Error: HTTP {response.status_code}")
+                    break
+                    
+            except Exception as e:
+                print(f"✗ Error collecting data: {str(e)}")
+                break
+        
+        self.data = all_records
+        print(f"\n✓ Total records collected: {len(all_records)}")
+        
+        return pd.DataFrame(all_records)
+    
+    def _extract_record_data(self, record: dict) -> dict:
+        """
+        Extract relevant fields from FAERS record
+        """
+        # Patient demographics
+        patient = record.get('patient', {})
+        patient_age = None
+        patient_weight = None
+        patient_sex = None
+        
+        if isinstance(patient.get('patientonsetage'), (int, float, str)):
+            try:
+                patient_age = float(patient.get('patientonsetage'))
+            except:
+                pass
+        
+        if isinstance(patient.get('patientweight'), (int, float, str)):
+            try:
+                patient_weight = float(patient.get('patientweight'))
+            except:
+                pass
+        
+        if 'patientsex' in patient:
+            patient_sex = patient['patientsex']
+        
+        # Drug information
+        drugs = patient.get('drug', [])
+        if not isinstance(drugs, list):
+            drugs = [drugs]
+        
+        # Find Epcoritamab drug entry
+        epcoritamab_drug = None
+        concomitant_drugs = []
+        
+        for drug in drugs:
+            drug_name = drug.get('medicinalproduct', '').upper()
+            if 'EPCORITAMAB' in drug_name:
+                epcoritamab_drug = drug
+            else:
+                concomitant_drugs.append(drug_name)
+        
+        # Drug dates
+        drug_start_date = None
+        drug_end_date = None
+        if epcoritamab_drug:
+            drug_start_date = epcoritamab_drug.get('drugstartdate')
+            drug_end_date = epcoritamab_drug.get('drugenddate')
+        
+        # Reactions (adverse events)
+        reactions = patient.get('reaction', [])
+        if not isinstance(reactions, list):
+            reactions = [reactions]
+        
+        reaction_list = []
+        has_crs = False
+        has_severe_crs = False
+        
+        for reaction in reactions:
+            reaction_term = reaction.get('reactionmeddrapt', '').upper()
+            reaction_list.append(reaction_term)
+            
+            # Check for CRS
+            if any(crs_term in reaction_term for crs_term in self.crs_terms):
+                has_crs = True
+                # Check severity
+                outcome = reaction.get('reactionoutcome', '')
+                if outcome in ['5', '6']:  # Death or life-threatening
+                    has_severe_crs = True
+        
+        # Event timing
+        reaction_date = None
+        if reactions:
+            reaction_date = reactions[0].get('reactionstartdate') if reactions else None
+        
+        # Calculate time to event
+        time_to_event = None
+        if drug_start_date and reaction_date:
+            try:
+                start = datetime.strptime(str(drug_start_date)[:8], '%Y%m%d')
+                event = datetime.strptime(str(reaction_date)[:8], '%Y%m%d')
+                time_to_event = (event - start).days
+            except:
+                pass
+        
+        # Seriousness indicators
+        serious = record.get('serious', '0')
+        seriousness_death = record.get('seriousnessdeath', '0')
+        seriousness_lifethreat = record.get('seriousnesslifethreatening', '0')
+        seriousness_hosp = record.get('seriousnesshospitalization', '0')
+        seriousness_disabling = record.get('seriousnessdisabling', '0')
+        
+        # Build record
+        extracted_data = {
+            'safetyreportid': record.get('safetyreportid'),
+            'patient_age': patient_age,
+            'patient_weight': patient_weight,
+            'patient_sex': patient_sex,
+            'drug_start_date': drug_start_date,
+            'drug_end_date': drug_end_date,
+            'reaction_date': reaction_date,
+            'time_to_event_days': time_to_event,
+            'reactions': '; '.join(reaction_list),
+            'has_crs': has_crs,
+            'has_severe_crs': has_severe_crs,
+            'total_drugs': len(drugs),
+            'concomitant_drugs': len(concomitant_drugs),
+            'polypharmacy': len(drugs) >= 3,
+            'is_serious': serious == '1',
+            'is_death': seriousness_death == '1',
+            'is_lifethreatening': seriousness_lifethreat == '1',
+            'is_hospitalization': seriousness_hosp == '1',
+            'is_disabling': seriousness_disabling == '1',
+            'receiptdate': record.get('receiptdate')
+        }
+        
+        return extracted_data
+    
+    def prepare_survival_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Prepare data specifically for CRS survival analysis
+        """
+        print(f"\n" + "=" * 80)
+        print(f"PREPARING SURVIVAL ANALYSIS DATA")
+        print(f"=" * 80)
+        
+        # Filter for records with time information or use report date as proxy
+        df_clean = df.copy()
+        
+        # Handle missing time_to_event: use 0.5 day as minimum (same-day events)
+        df_clean['time_adjusted'] = df_clean['time_to_event_days'].fillna(0.5)
+        df_clean.loc[df_clean['time_adjusted'] <= 0, 'time_adjusted'] = 0.5
+        
+        # Event indicator: CRS occurrence
+        df_clean['event_occurred'] = df_clean['has_crs'].astype(int)
+        
+        # Add age groups for stratification
+        df_clean['age_group'] = pd.cut(df_clean['patient_age'], 
+                                        bins=[0, 50, 65, 100], 
+                                        labels=['<50', '50-65', '>65'])
+        
+        # Add weight groups
+        df_clean['weight_group'] = pd.cut(df_clean['patient_weight'],
+                                           bins=[0, 60, 80, 100, 200],
+                                           labels=['<60kg', '60-80kg', '80-100kg', '>100kg'])
+        
+        print(f"✓ Total records: {len(df_clean)}")
+        print(f"✓ CRS events: {df_clean['has_crs'].sum()} ({df_clean['has_crs'].sum()/len(df_clean)*100:.1f}%)")
+        print(f"✓ Severe CRS: {df_clean['has_severe_crs'].sum()} ({df_clean['has_severe_crs'].sum()/len(df_clean)*100:.1f}%)")
+        print(f"✓ Median time to CRS: {df_clean[df_clean['has_crs']]['time_adjusted'].median():.1f} days")
+        
+        return df_clean
+    
+    def run_cox_regression_crs(self, df: pd.DataFrame) -> Tuple[CoxPHFitter, pd.DataFrame]:
+        """
+        Run Cox proportional hazards model for CRS risk
+        """
+        print(f"\n" + "=" * 80)
+        print(f"COX PROPORTIONAL HAZARDS MODEL: CRS RISK FACTORS")
+        print(f"=" * 80)
+        
+        # Select features for Cox model (only non-missing)
+        features = ['patient_age', 'patient_weight', 'total_drugs', 
+                   'concomitant_drugs', 'polypharmacy',
+                   'is_lifethreatening', 'is_hospitalization']
+        
+        # Prepare dataset
+        cox_data = df[features + ['time_adjusted', 'event_occurred']].copy()
+        cox_data = cox_data.dropna()
+        
+        # Convert boolean to int
+        for col in ['polypharmacy', 'is_lifethreatening', 'is_hospitalization']:
+            cox_data[col] = cox_data[col].astype(int)
+        
+        print(f"\n✓ Cox regression dataset: {len(cox_data)} records")
+        print(f"✓ Events: {cox_data['event_occurred'].sum()}")
+        print(f"✓ Features: {len(features)}")
+        
+        # Fit Cox model
+        cph = CoxPHFitter(penalizer=0.01)
+        cph.fit(cox_data, duration_col='time_adjusted', event_col='event_occurred')
+        
+        # Print results
+        print(f"\n" + "-" * 80)
+        print("COX MODEL RESULTS")
+        print("-" * 80)
+        print(cph.summary)
+        
+        print(f"\n✓ C-index (concordance): {cph.concordance_index_:.4f}")
+        
+        return cph, cox_data
+    
+    def kaplan_meier_analysis(self, df: pd.DataFrame) -> None:
+        """
+        Kaplan-Meier survival analysis for CRS
+        """
+        print(f"\n" + "=" * 80)
+        print(f"KAPLAN-MEIER SURVIVAL ANALYSIS: CRS-FREE SURVIVAL")
+        print(f"=" * 80)
+        
+        # Overall CRS-free survival
+        kmf = KaplanMeierFitter()
+        df_km = df[['time_adjusted', 'event_occurred']].dropna()
+        
+        kmf.fit(df_km['time_adjusted'], df_km['event_occurred'], label='Epcoritamab CRS-free survival')
+        
+        print(f"\n✓ Median CRS-free survival: {kmf.median_survival_time_:.1f} days")
+        
+        # Survival at key time points
+        time_points = [1, 7, 14, 30, 60, 90]
+        print(f"\nCRS-free survival rates:")
+        for t in time_points:
+            try:
+                survival_prob = kmf.survival_function_at_times(t).values[0]
+                print(f"  Day {t:3d}: {survival_prob*100:5.1f}% CRS-free")
+            except:
+                pass
+        
+        # Create KM plot
+        fig, ax = plt.subplots(figsize=(10, 6))
+        kmf.plot_survival_function(ax=ax, ci_show=True)
+        ax.set_xlabel('Days from Epcoritamab initiation', fontsize=12)
+        ax.set_ylabel('CRS-free survival probability', fontsize=12)
+        ax.set_title('Kaplan-Meier Curve: Cytokine Release Syndrome After Epcoritamab', 
+                    fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig('requirement2_epcoritamab_crs_km_curve.png', dpi=300, bbox_inches='tight')
+        print(f"\n✓ Saved: requirement2_epcoritamab_crs_km_curve.png")
+        plt.close()
+        
+        # Stratified analysis by risk factors
+        self._stratified_km_analysis(df)
+        
+    def _stratified_km_analysis(self, df: pd.DataFrame) -> None:
+        """
+        Stratified Kaplan-Meier analysis by risk factors
+        """
+        print(f"\n" + "-" * 80)
+        print("STRATIFIED KAPLAN-MEIER ANALYSIS")
+        print("-" * 80)
+        
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        
+        # 1. By age group
+        ax = axes[0, 0]
+        for age_group in ['<50', '50-65', '>65']:
+            df_group = df[df['age_group'] == age_group]
+            if len(df_group) > 10:
+                kmf = KaplanMeierFitter()
+                kmf.fit(df_group['time_adjusted'], df_group['event_occurred'], 
+                       label=f'Age {age_group}')
+                kmf.plot_survival_function(ax=ax, ci_show=False)
+        ax.set_title('CRS-free Survival by Age Group', fontweight='bold')
+        ax.set_xlabel('Days')
+        ax.set_ylabel('CRS-free probability')
+        ax.grid(True, alpha=0.3)
+        
+        # 2. By polypharmacy
+        ax = axes[0, 1]
+        for poly in [False, True]:
+            df_group = df[df['polypharmacy'] == poly]
+            if len(df_group) > 10:
+                kmf = KaplanMeierFitter()
+                label = 'Polypharmacy (≥3 drugs)' if poly else 'No polypharmacy'
+                kmf.fit(df_group['time_adjusted'], df_group['event_occurred'], label=label)
+                kmf.plot_survival_function(ax=ax, ci_show=False)
+        ax.set_title('CRS-free Survival by Polypharmacy', fontweight='bold')
+        ax.set_xlabel('Days')
+        ax.set_ylabel('CRS-free probability')
+        ax.grid(True, alpha=0.3)
+        
+        # 3. By prior hospitalization
+        ax = axes[1, 0]
+        for hosp in [False, True]:
+            df_group = df[df['is_hospitalization'] == hosp]
+            if len(df_group) > 10:
+                kmf = KaplanMeierFitter()
+                label = 'Prior hospitalization' if hosp else 'No prior hospitalization'
+                kmf.fit(df_group['time_adjusted'], df_group['event_occurred'], label=label)
+                kmf.plot_survival_function(ax=ax, ci_show=False)
+        ax.set_title('CRS-free Survival by Prior Hospitalization', fontweight='bold')
+        ax.set_xlabel('Days')
+        ax.set_ylabel('CRS-free probability')
+        ax.grid(True, alpha=0.3)
+        
+        # 4. CRS severity (for those who develop CRS)
+        ax = axes[1, 1]
+        df_crs = df[df['has_crs'] == True]
+        if len(df_crs) > 0:
+            severe_count = df_crs['has_severe_crs'].sum()
+            mild_count = len(df_crs) - severe_count
+            
+            categories = ['Mild/Moderate CRS', 'Severe CRS']
+            counts = [mild_count, severe_count]
+            colors = ['#2ecc71', '#e74c3c']
+            
+            ax.bar(categories, counts, color=colors, alpha=0.7, edgecolor='black')
+            ax.set_ylabel('Number of patients')
+            ax.set_title('CRS Severity Distribution', fontweight='bold')
+            ax.grid(True, alpha=0.3, axis='y')
+            
+            for i, count in enumerate(counts):
+                ax.text(i, count, str(count), ha='center', va='bottom', fontweight='bold')
+        
+        plt.tight_layout()
+        plt.savefig('requirement2_epcoritamab_crs_stratified_analysis.png', dpi=300, bbox_inches='tight')
+        print(f"✓ Saved: requirement2_epcoritamab_crs_stratified_analysis.png")
+        plt.close()
+    
+    def feature_selection_crs(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Feature selection to identify CRS risk factors
+        """
+        print(f"\n" + "=" * 80)
+        print(f"FEATURE SELECTION: CRS RISK FACTORS")
+        print(f"=" * 80)
+        
+        # Prepare features
+        feature_cols = ['patient_age', 'patient_weight', 'total_drugs', 
+                       'concomitant_drugs', 'polypharmacy',
+                       'is_lifethreatening', 'is_hospitalization']
+        
+        df_features = df[feature_cols + ['has_crs']].copy()
+        
+        # Convert boolean to int
+        for col in ['polypharmacy', 'is_lifethreatening', 'is_hospitalization', 'has_crs']:
+            df_features[col] = df_features[col].astype(int)
+        
+        # Remove missing
+        df_features = df_features.dropna()
+        
+        X = df_features[feature_cols]
+        y = df_features['has_crs']
+        
+        print(f"\n✓ Feature selection dataset: {len(df_features)} records")
+        print(f"✓ CRS cases: {y.sum()} ({y.sum()/len(y)*100:.1f}%)")
+        
+        # Method 1: F-test
+        print(f"\n" + "-" * 80)
+        print("METHOD 1: ANOVA F-TEST")
+        print("-" * 80)
+        
+        selector_f = SelectKBest(score_func=f_classif, k='all')
+        selector_f.fit(X, y)
+        
+        f_scores = pd.DataFrame({
+            'Feature': feature_cols,
+            'F-statistic': selector_f.scores_,
+            'p-value': selector_f.pvalues_
+        }).sort_values('F-statistic', ascending=False)
+        
+        print(f_scores.to_string(index=False))
+        
+        # Method 2: Mutual Information
+        print(f"\n" + "-" * 80)
+        print("METHOD 2: MUTUAL INFORMATION")
+        print("-" * 80)
+        
+        mi_scores = mutual_info_classif(X, y, random_state=42)
+        mi_df = pd.DataFrame({
+            'Feature': feature_cols,
+            'MI Score': mi_scores
+        }).sort_values('MI Score', ascending=False)
+        
+        print(mi_df.to_string(index=False))
+        
+        # Method 3: Random Forest Importance
+        print(f"\n" + "-" * 80)
+        print("METHOD 3: RANDOM FOREST FEATURE IMPORTANCE")
+        print("-" * 80)
+        
+        rf = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=10)
+        rf.fit(X, y)
+        
+        rf_importance = pd.DataFrame({
+            'Feature': feature_cols,
+            'Importance': rf.feature_importances_
+        }).sort_values('Importance', ascending=False)
+        
+        print(rf_importance.to_string(index=False))
+        
+        # Combined ranking
+        print(f"\n" + "-" * 80)
+        print("COMBINED FEATURE RANKING")
+        print("-" * 80)
+        
+        combined = pd.DataFrame({
+            'Feature': feature_cols,
+            'F_rank': f_scores.reset_index()['Feature'].apply(lambda x: list(f_scores['Feature']).index(x) + 1),
+            'MI_rank': mi_df.reset_index()['Feature'].apply(lambda x: list(mi_df['Feature']).index(x) + 1),
+            'RF_rank': rf_importance.reset_index()['Feature'].apply(lambda x: list(rf_importance['Feature']).index(x) + 1)
+        })
+        
+        combined['Avg_rank'] = combined[['F_rank', 'MI_rank', 'RF_rank']].mean(axis=1)
+        combined = combined.sort_values('Avg_rank')
+        
+        print(combined.to_string(index=False))
+        
+        return combined
+    
+    def clinical_risk_stratification(self, df: pd.DataFrame, cox_model: CoxPHFitter) -> None:
+        """
+        Develop clinical risk stratification for CRS
+        """
+        print(f"\n" + "=" * 80)
+        print(f"CLINICAL RISK STRATIFICATION FOR CRS")
+        print(f"=" * 80)
+        
+        # Calculate risk scores based on Cox model
+        df_risk = df.copy()
+        
+        # Risk factors from Cox model
+        # High-risk criteria (based on typical CRS risk factors)
+        df_risk['risk_score'] = 0
+        
+        # Age >65
+        df_risk.loc[df_risk['patient_age'] > 65, 'risk_score'] += 1
+        
+        # High tumor burden (proxy: multiple drugs)
+        df_risk.loc[df_risk['total_drugs'] >= 3, 'risk_score'] += 1
+        
+        # Prior serious events
+        df_risk.loc[df_risk['is_lifethreatening'] == True, 'risk_score'] += 2
+        df_risk.loc[df_risk['is_hospitalization'] == True, 'risk_score'] += 1
+        
+        # Risk categories
+        df_risk['risk_category'] = pd.cut(df_risk['risk_score'],
+                                          bins=[-1, 0, 2, 10],
+                                          labels=['Low', 'Moderate', 'High'])
+        
+        # CRS rates by risk category
+        print(f"\nCRS RATES BY RISK CATEGORY:")
+        print("-" * 80)
+        
+        for risk in ['Low', 'Moderate', 'High']:
+            df_cat = df_risk[df_risk['risk_category'] == risk]
+            crs_rate = df_cat['has_crs'].sum() / len(df_cat) * 100 if len(df_cat) > 0 else 0
+            severe_rate = df_cat['has_severe_crs'].sum() / len(df_cat) * 100 if len(df_cat) > 0 else 0
+            
+            print(f"\n{risk} Risk:")
+            print(f"  • Patients: {len(df_cat)}")
+            print(f"  • CRS rate: {crs_rate:.1f}%")
+            print(f"  • Severe CRS rate: {severe_rate:.1f}%")
+            
+            if len(df_cat[df_cat['has_crs']]) > 0:
+                median_time = df_cat[df_cat['has_crs']]['time_adjusted'].median()
+                print(f"  • Median time to CRS: {median_time:.1f} days")
+        
+        # Visualization
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        
+        # CRS rates by risk category
+        ax = axes[0]
+        risk_summary = df_risk.groupby('risk_category').agg({
+            'has_crs': ['sum', 'count']
+        })
+        risk_summary.columns = ['CRS_count', 'Total']
+        risk_summary['CRS_rate'] = risk_summary['CRS_count'] / risk_summary['Total'] * 100
+        
+        colors = ['#2ecc71', '#f39c12', '#e74c3c']
+        ax.bar(risk_summary.index, risk_summary['CRS_rate'], color=colors, alpha=0.7, edgecolor='black')
+        ax.set_ylabel('CRS Rate (%)', fontsize=12)
+        ax.set_xlabel('Risk Category', fontsize=12)
+        ax.set_title('CRS Risk Stratification for Epcoritamab', fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        for i, (idx, row) in enumerate(risk_summary.iterrows()):
+            ax.text(i, row['CRS_rate'], f"{row['CRS_rate']:.1f}%\n(n={int(row['Total'])})", 
+                   ha='center', va='bottom', fontweight='bold')
+        
+        # Time to CRS by risk category
+        ax = axes[1]
+        risk_categories = ['Low', 'Moderate', 'High']
+        for risk_cat in risk_categories:
+            df_cat = df_risk[(df_risk['risk_category'] == risk_cat) & (df_risk['has_crs'] == True)]
+            if len(df_cat) > 10:
+                kmf = KaplanMeierFitter()
+                kmf.fit(df_cat['time_adjusted'], [1]*len(df_cat), label=f'{risk_cat} risk')
+                kmf.plot_survival_function(ax=ax, ci_show=False)
+        
+        ax.set_xlabel('Days from Epcoritamab initiation', fontsize=12)
+        ax.set_ylabel('CRS-free probability', fontsize=12)
+        ax.set_title('Time to CRS by Risk Category', fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig('requirement2_epcoritamab_crs_risk_stratification.png', dpi=300, bbox_inches='tight')
+        print(f"\n✓ Saved: requirement2_epcoritamab_crs_risk_stratification.png")
+        plt.close()
+    
+    def generate_clinical_report(self, df: pd.DataFrame, cox_model: CoxPHFitter, 
+                                 feature_ranking: pd.DataFrame) -> None:
+        """
+        Generate comprehensive clinical report
+        """
+        print(f"\n" + "=" * 80)
+        print(f"GENERATING CLINICAL REPORT")
+        print(f"=" * 80)
+        
+        report = []
+        report.append("=" * 80)
+        report.append("CLINICAL REPORT: EPCORITAMAB AND CYTOKINE RELEASE SYNDROME")
+        report.append("AI-Powered Pharmacovigilance System")
+        report.append("=" * 80)
+        report.append("")
+        
+        # Summary statistics
+        report.append("1. SUMMARY STATISTICS")
+        report.append("-" * 80)
+        report.append(f"Total Epcoritamab patients analyzed: {len(df)}")
+        report.append(f"Cytokine Release Syndrome cases: {df['has_crs'].sum()} ({df['has_crs'].sum()/len(df)*100:.1f}%)")
+        report.append(f"Severe CRS cases: {df['has_severe_crs'].sum()} ({df['has_severe_crs'].sum()/len(df)*100:.1f}%)")
+        
+        crs_patients = df[df['has_crs']]
+        if len(crs_patients) > 0:
+            report.append(f"Median time to CRS: {crs_patients['time_adjusted'].median():.1f} days")
+            report.append(f"Mean time to CRS: {crs_patients['time_adjusted'].mean():.1f} days")
+            report.append(f"Range: {crs_patients['time_adjusted'].min():.1f} - {crs_patients['time_adjusted'].max():.1f} days")
+        report.append("")
+        
+        # Cox model results
+        report.append("2. COX PROPORTIONAL HAZARDS MODEL RESULTS")
+        report.append("-" * 80)
+        report.append(f"Concordance index (C-index): {cox_model.concordance_index_:.4f}")
+        report.append("")
+        report.append("Risk Factors (Hazard Ratios):")
+        
+        summary = cox_model.summary
+        for idx, row in summary.iterrows():
+            hr = row['exp(coef)']
+            ci_lower = row['exp(coef) lower 95%']
+            ci_upper = row['exp(coef) upper 95%']
+            p_val = row['p']
+            
+            sig = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*" if p_val < 0.05 else ""
+            
+            report.append(f"  • {idx}: HR={hr:.3f} (95% CI: {ci_lower:.3f}-{ci_upper:.3f}), p={p_val:.4f} {sig}")
+        report.append("")
+        
+        # Feature importance
+        report.append("3. KEY RISK FACTORS FOR CRS")
+        report.append("-" * 80)
+        report.append("Top predictors (ensemble ranking):")
+        for idx, row in feature_ranking.head(5).iterrows():
+            report.append(f"  {idx+1}. {row['Feature']} (avg rank: {row['Avg_rank']:.1f})")
+        report.append("")
+        
+        # Clinical recommendations
+        report.append("4. CLINICAL RECOMMENDATIONS")
+        report.append("-" * 80)
+        report.append("")
+        report.append("HIGH-RISK PATIENTS (Risk score ≥3):")
+        report.append("  • Age >65 years")
+        report.append("  • Polypharmacy (≥3 drugs)")
+        report.append("  • Prior life-threatening events")
+        report.append("  • History of hospitalization")
+        report.append("")
+        report.append("MONITORING PROTOCOL:")
+        report.append("  Week 1: Daily clinical assessment")
+        report.append("    - Vital signs q4h (temperature, BP, HR, SpO2)")
+        report.append("    - CRS grading (Lee criteria)")
+        report.append("    - Labs: CBC, CMP, ferritin, CRP, IL-6")
+        report.append("    - Early tocilizumab readiness")
+        report.append("")
+        report.append("  Week 2-4: Every 2-3 days assessment")
+        report.append("    - Continue vital signs monitoring")
+        report.append("    - Labs every 3 days")
+        report.append("    - Symptom surveillance")
+        report.append("")
+        report.append("  Month 2-3: Weekly assessment")
+        report.append("    - Clinical review")
+        report.append("    - Labs as needed")
+        report.append("    - Long-term toxicity monitoring")
+        report.append("")
+        report.append("CRS MANAGEMENT:")
+        report.append("  Grade 1: Supportive care, close monitoring")
+        report.append("  Grade 2: Consider tocilizumab 8 mg/kg IV (max 800mg)")
+        report.append("  Grade 3-4: Tocilizumab + corticosteroids (dexamethasone 10mg IV)")
+        report.append("  Refractory: Repeat tocilizumab q8h PRN, escalate steroids")
+        report.append("")
+        
+        # Save report
+        report_text = "\n".join(report)
+        print(report_text)
+        
+        with open('requirement2_epcoritamab_crs_clinical_report.txt', 'w') as f:
+            f.write(report_text)
+        
+        print(f"\n✓ Saved: requirement2_epcoritamab_crs_clinical_report.txt")
+    
+    def run_complete_analysis(self) -> None:
+        """
+        Run complete focused analysis pipeline
+        """
+        print(f"\n")
+        print(f"#" * 80)
+        print(f"# FOCUSED ANALYSIS: EPCORITAMAB AND CYTOKINE RELEASE SYNDROME")
+        print(f"#" * 80)
+        print(f"\n")
+        
+        # Step 1: Collect data
+        df = self.collect_epcoritamab_data(limit=1000)
+        
+        if len(df) == 0:
+            print("✗ No data collected. Exiting.")
+            return
+        
+        # Save raw data
+        df.to_csv('requirement2_epcoritamab_raw_data.csv', index=False)
+        print(f"\n✓ Saved: requirement2_epcoritamab_raw_data.csv")
+        
+        # Step 2: Prepare survival data
+        df_survival = self.prepare_survival_data(df)
+        
+        # Step 3: Cox regression
+        cox_model, cox_data = self.run_cox_regression_crs(df_survival)
+        
+        # Step 4: Kaplan-Meier analysis
+        self.kaplan_meier_analysis(df_survival)
+        
+        # Step 5: Feature selection
+        feature_ranking = self.feature_selection_crs(df_survival)
+        
+        # Step 6: Risk stratification
+        self.clinical_risk_stratification(df_survival, cox_model)
+        
+        # Step 7: Generate clinical report
+        self.generate_clinical_report(df_survival, cox_model, feature_ranking)
+        
+        # Save final analysis data
+        df_survival.to_csv('requirement2_epcoritamab_crs_analysis_data.csv', index=False)
+        print(f"\n✓ Saved: requirement2_epcoritamab_crs_analysis_data.csv")
+        
+        print(f"\n" + "=" * 80)
+        print(f"ANALYSIS COMPLETE")
+        print(f"=" * 80)
+        print(f"\nGenerated files:")
+        print(f"  • requirement2_epcoritamab_raw_data.csv")
+        print(f"  • requirement2_epcoritamab_crs_analysis_data.csv")
+        print(f"  • requirement2_epcoritamab_crs_km_curve.png")
+        print(f"  • requirement2_epcoritamab_crs_stratified_analysis.png")
+        print(f"  • requirement2_epcoritamab_crs_risk_stratification.png")
+        print(f"  • requirement2_epcoritamab_crs_clinical_report.txt")
+        print(f"\n")
+
+
+def main():
+    """
+    Main execution function
+    """
+    print(f"\n")
+    print(f"╔{'═'*78}╗")
+    print(f"║{' '*78}║")
+    print(f"║{'REQUIREMENT 2: FOCUSED SURVIVAL ANALYSIS':^78}║")
+    print(f"║{'Epcoritamab and Cytokine Release Syndrome':^78}║")
+    print(f"║{' '*78}║")
+    print(f"╚{'═'*78}╝")
+    print(f"\n")
+    
+    # Run analysis
+    analyzer = EpcoritamabCRSAnalysis()
+    analyzer.run_complete_analysis()
+    
+    print(f"\n✅ All analyses complete!")
+    print(f"\nNext steps:")
+    print(f"  1. Review generated visualizations")
+    print(f"  2. Read clinical report for recommendations")
+    print(f"  3. Update slides 3-5 with focused results")
+    print(f"\n")
+
+
+if __name__ == "__main__":
+    main()
+
+
+

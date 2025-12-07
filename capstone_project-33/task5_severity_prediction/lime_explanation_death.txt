@@ -1,0 +1,18 @@
+LIME Explanation - Death Case (Sample 4)
+============================================================
+
+Prediction (threshold=0.5): 1
+Prediction Probabilities [p0, p1]: [0.24988317 0.7501168 ]
+
+Top-10 Feature Contributions:
+------------------------------------------------------------
+1.00 < patientsex <= 2.00                         : -0.219314
+patientweight > 71.70                             : -0.167315
+num_drugs > 9.00                                  :  0.088429
+sex_male <= 0.00                                  : -0.066143
+age_missing <= 0.00                               : -0.049213
+patientonsetage > 68.00                           :  0.022886
+age_years > 69.00                                 :  0.021929
+num_reactions <= 1.00                             : -0.020843
+0.00 < sex_female <= 1.00                         : -0.019473
+sex_unknown <= 0.00                               : -0.011657
